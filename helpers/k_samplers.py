@@ -4,6 +4,7 @@ from k_diffusion.external import CompVisDenoiser
 from k_diffusion import sampling
 from torch import nn
 
+        
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -21,6 +22,7 @@ def sampler_fn(
     c: torch.Tensor,
     uc: torch.Tensor,
     args,
+    #n,
     model_wrap: CompVisDenoiser,
     init_latent: Optional[torch.Tensor] = None,
     t_enc: Optional[torch.Tensor] = None,
@@ -32,6 +34,7 @@ def sampler_fn(
     shape = [args.C, args.H // args.f, args.W // args.f]
     sigmas: torch.Tensor = model_wrap.get_sigmas(args.steps)
     sigmas = sigmas[len(sigmas) - t_enc - 1 :]
+    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
     if args.use_init:
         if len(sigmas) > 0:
             x = (
@@ -45,14 +48,36 @@ def sampler_fn(
             x = torch.randn([args.n_samples, *shape], device=device) * sigmas[0]
         else:
             x = torch.zeros([args.n_samples, *shape], device=device)
-    sampler_args = {
-        "model": CFGDenoiser(model_wrap),
-        "x": x,
-        "sigmas": sigmas,
-        "extra_args": {"cond": c, "uncond": uc, "cond_scale": args.scale},
-        "disable": False,
-        "callback": cb,
-    }
+    if args.sampler in ["klms","dpm2","dpm2_ancestral","heun","euler","euler_ancestral","dpm3_ancestral"]:        
+        sampler_args = {
+            "model": CFGDenoiser(model_wrap),
+            "x": x,
+            "sigmas": sigmas,
+            "extra_args": {"cond": c, "uncond": uc, "cond_scale": args.scale},
+            "disable": False,
+            "callback": cb,
+        }
+    if args.sampler in ["dpm_adaptive"]:
+        sampler_args = {
+            "model": CFGDenoiser(model_wrap),
+            "x": x,
+            "sigma_min": sigma_min,
+            "sigma_max" : sigma_max,
+            "extra_args": {"cond": c, "uncond": uc, "cond_scale": args.scale},
+            "disable": False,
+            "callback": cb,
+        }
+    """if args.sampler in ["dpm_fast"]:
+        sampler_args = {
+            "model": CFGDenoiser(model_wrap),
+            "x": x,
+            "sigma_min": sigma_min,
+            "sigma_max" : sigma_max,
+            "n" : n,
+            "extra_args": {"cond": c, "uncond": uc, "cond_scale": args.scale},
+            "disable": False,
+            "callback": cb,
+        }"""
     sampler_map = {
         "klms": sampling.sample_lms,
         "dpm2": sampling.sample_dpm_2,
@@ -60,6 +85,9 @@ def sampler_fn(
         "heun": sampling.sample_heun,
         "euler": sampling.sample_euler,
         "euler_ancestral": sampling.sample_euler_ancestral,
+        "dpm_fast":sampling.sample_dpm_fast,
+        "dpm_adaptive":sampling.sample_dpm_adaptive,
+        "dpm3_ancestral":sampling.sample_dpm_3_ancestral,
     }
 
     samples = sampler_map[args.sampler](**sampler_args)
