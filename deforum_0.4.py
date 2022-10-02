@@ -64,6 +64,30 @@ from itertools import islice
 
 sys.stdout.write("Parsing arguments ...\n")
 sys.stdout.flush()
+#############################   HD extra stuff   ##########################################
+class Options:
+    prompt: List[str]
+    outdir: str
+    steps: int
+    n_iter: int
+    H: int
+    W: int
+    C: int
+    f: int
+    scale: float
+    strength: float
+    from_file: bool
+    config: str
+    ckpt: str
+    passes: int
+    wm: str
+    realesrgan: str
+    detail_steps: int
+    detail_scale: float
+    gobig_overlap: int
+    generated: Optional[List[str]]
+    img: str
+###########################################################################################
 
 def parse_args():
     desc = "Blah"
@@ -84,7 +108,7 @@ def parse_args():
     parser.add_argument("--save_samples", type=int, help="save individual images")
     parser.add_argument("--max_frames", type=int, help="how many frames to create")
     parser.add_argument("--init_img", type=str, help="path to the input image")
-    parser.add_argument("--strength", type=float, help="strength for noising/unnoising. 1.0 corresponds to full destruction of information in init image")
+    parser.add_argument("--strength", type=float,default=0.3, help="strength for noising/unnoising. 1.0 corresponds to full destruction of information in init image")
     parser.add_argument("--ddim_eta", type=float, help="ddim eta (eta=0.0 corresponds to deterministic sampling")
     parser.add_argument("--input_video", type=str, help="video to process")
     parser.add_argument("--extract_nth_frame", type=int)
@@ -565,7 +589,7 @@ def transform_image_3d(prev_img_cv2, depth_tensor, rot_mat, translate, anim_args
 def generate(args, return_latent=False, return_sample=False, return_c=False):
     seed_everything(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
-
+    
     sampler = PLMSSampler(model) if args.sampler == 'plms' else DDIMSampler(model)
     model_wrap = CompVisDenoiser(model)
     batch_size = args.n_samples
@@ -634,6 +658,7 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
                             sigmas=k_sigmas,
                             sampler=sampler)  
     #############################   HD extra stuff   ##########################################
+    args2.use_init = args2.generated
     os.makedirs(args2.outdir, exist_ok=True)
     outpath = args2.outdir
 
@@ -656,9 +681,12 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
         generated = [f"{base_count:05}"]
     elif isinstance(generated, str):
         generated = [generated]
+    if generated is None:
+        generated = []
     ############################################################################################
         
     results = []
+    
     with torch.no_grad():
         #with precision_scope("cuda"):
         with torch.cuda.amp.autocast():
@@ -730,7 +758,7 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
                         results.append(image)
                         
                     #############################   HD extra stuff   ##########################################
-                    """
+                    
                             
                     #x_samples_ddim = model.decode_first_stage(samples1)
                     #x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
@@ -794,8 +822,8 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
                 init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
                 
                 #fix for using less VRAM 2/3 next line added
-                #with torch.cuda.amp.autocast(): # needed for half precision!
-                init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
+                with torch.cuda.amp.autocast(): # needed for half precision!
+                    init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
 
                 sampler.make_schedule(ddim_num_steps=args2.detail_steps, ddim_eta=0, verbose=False)
 
@@ -810,7 +838,7 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
                     
                         with model.ema_scope():
                             for prompts in tqdm(data, desc="data"):
-                                uc = None
+                                """uc = None
                                 if args2.detail_scale != 1.0:
                                     uc = model.get_learned_conditioning(batch_size * [args2.negative_prompt])
                                 if isinstance(prompts, tuple):
@@ -821,7 +849,54 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
                                 z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
                                 # decode it
                                 samples = sampler.decode(z_enc, c, t_enc, unconditional_guidance_scale=args2.detail_scale,
-                                                        unconditional_conditioning=uc,)
+                                                        unconditional_conditioning=uc,)"""
+                                uc = None
+                                if args.scale != 1.0:
+                                    uc = model.get_learned_conditioning(batch_size * [args2.negative_prompt])
+                                if isinstance(prompts, tuple):
+                                    prompts = list(prompts)
+                                c = model.get_learned_conditioning(prompts)
+
+                                #if generated != None:
+                                #    c = generated
+
+                                if args.sampler in ["klms","dpm2","dpm2_ancestral","heun","euler","euler_ancestral","dpm_adaptive","dpm3_ancestral"]:
+                                    samples = sampler_fn(#n,
+                                        c=c, 
+                                        uc=uc, 
+                                        args=args, 
+                                        model_wrap=model_wrap, 
+                                        init_latent=generated, 
+                                        t_enc=t_enc, 
+                                        device=device, 
+                                        cb=callback)
+                                else:
+                                    # args.sampler == 'plms' or args.sampler == 'ddim':
+                                    if init_latent is not None and args.strength > 0:
+                                        z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
+                                    else:
+                                        z_enc = torch.randn([args.n_samples, args.C, args.H // args.f, args.W // args.f], device=device)
+                                    if args.sampler == 'ddim':
+                                        samples = sampler.decode(z_enc, 
+                                                     c, 
+                                                     t_enc, 
+                                                     unconditional_guidance_scale=args.scale,
+                                                     unconditional_conditioning=uc,
+                                                     img_callback=callback)
+                                    elif args.sampler == 'plms': # no "decode" function in plms, so use "sample"
+                                        shape = [args.C, args.H // args.f, args.W // args.f]
+                                        samples, _ = sampler.sample(S=args.steps,
+                                                            conditioning=c,
+                                                            batch_size=args.n_samples,
+                                                            shape=shape,
+                                                            verbose=False,
+                                                            unconditional_guidance_scale=args.scale,
+                                                            unconditional_conditioning=uc,
+                                                            eta=args.ddim_eta,
+                                                            x_T=z_enc,
+                                                            img_callback=callback)
+                                    else:
+                                        raise Exception(f"Sampler {args.sampler} not recognised.")
 
                                 x_samples = model.decode_first_stage(samples)
                                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
@@ -861,7 +936,7 @@ def generate(args, return_latent=False, return_sample=False, return_c=False):
             base_filename = f"{base_filename}d"
 
             torch.cuda.empty_cache()
-            gc.collect()"""
+            gc.collect()
             #######################################################################################################################
             
             
